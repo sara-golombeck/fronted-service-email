@@ -15,7 +15,6 @@ pipeline {
     triggers {
         githubPush()
     }
-    
     stages {
         stage('Checkout') {
             steps {
