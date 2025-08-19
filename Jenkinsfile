@@ -11,7 +11,6 @@ pipeline {
         GITOPS_REPO = 'git@github.com:sara-golombeck/gitops-automarkly.git'
         HELM_VALUES_PATH = 'charts/automarkly/values.yaml'
     }
-    
     triggers {
         githubPush()
     }
