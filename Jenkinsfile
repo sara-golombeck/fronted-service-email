@@ -9,7 +9,7 @@ pipeline {
         ECR_REPO_FRONTEND = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/automarkly/emailservice-frontend"
         ECR_REPO_BACKEND = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/automarkly/emailservice-backend"
         GITOPS_REPO = 'git@github.com:sara-golombeck/gitops-email-service.git'
-        HELM_VALUES_PATH = 'charts/automarkly/values.yaml'
+        HELM_VALUES_PATH = 'charts/email-service/values.yaml'
     }
 
     triggers {
