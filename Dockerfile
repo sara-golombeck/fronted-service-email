@@ -11,7 +11,7 @@ COPY . .
 RUN npm run build
 
 # Production stage
-FROM nginx:alpine AS production
+FROM nginxinc/nginx-unprivileged:alpine AS production
 WORKDIR /usr/share/nginx/html
 
 # Remove default nginx files
@@ -23,11 +23,8 @@ COPY --from=build /app/build .
 # Copy nginx config
 COPY nginx/default.conf /etc/nginx/conf.d/default.conf
 
-# Just run as root - simpler and works
-# USER root is default
-
 # Expose port
-EXPOSE 80
+EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
