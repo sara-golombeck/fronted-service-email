@@ -14,8 +14,10 @@ RUN npm run build
 FROM nginxinc/nginx-unprivileged:alpine AS production
 WORKDIR /usr/share/nginx/html
 
-# Remove default nginx files
+# Remove default nginx files (as root first)
+USER root
 RUN rm -rf ./*
+USER nginx
 
 # Copy built app
 COPY --from=build /app/build .
