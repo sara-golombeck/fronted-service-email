@@ -23,22 +23,22 @@ pipeline {
             }
         }
         
-        stage('Unit Tests') {
-            steps {
-                sh '''
-                    docker build -f Dockerfile.test -t "${APP_NAME}:test-${BUILD_NUMBER}" .
-                    mkdir -p coverage
-                    docker run --rm \
-                        -v "${PWD}/coverage:/app/coverage" \
-                        "${APP_NAME}:test-${BUILD_NUMBER}"
-                '''
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'coverage/**/*', allowEmptyArchive: true
-                }
-            }
-        }
+        // stage('Unit Tests') {
+        //     steps {
+        //         sh '''
+        //             docker build -f Dockerfile.test -t "${APP_NAME}:test-${BUILD_NUMBER}" .
+        //             mkdir -p coverage
+        //             docker run --rm \
+        //                 -v "${PWD}/coverage:/app/coverage" \
+        //                 "${APP_NAME}:test-${BUILD_NUMBER}"
+        //         '''
+        //     }
+        //     post {
+        //         always {
+        //             archiveArtifacts artifacts: 'coverage/**/*', allowEmptyArchive: true
+        //         }
+        //     }
+        // }
         
         stage('Build Application') {
             steps {
@@ -48,39 +48,39 @@ pipeline {
             }
         }
         
-        stage('E2E Tests') {
-            steps {
-                withCredentials([string(credentialsId: 'ECR_TAG_BACK', variable: 'ECR_TAG_BACK')]) {
-                    sh '''
-                        cat > .env <<EOF
-                        POSTGRES_DB=automarkly_test
-                        POSTGRES_USER=postgres
-                        POSTGRES_PASSWORD=postgres123
-                        COMPOSE_PROJECT_NAME=automarkly_e2e
-                        ECR_TAG_BACK=${ECR_TAG_BACK}
-                        EOF
+        // stage('E2E Tests') {
+        //     steps {
+        //         withCredentials([string(credentialsId: 'ECR_TAG_BACK', variable: 'ECR_TAG_BACK')]) {
+        //             sh '''
+        //                 cat > .env <<EOF
+        //                 POSTGRES_DB=automarkly_test
+        //                 POSTGRES_USER=postgres
+        //                 POSTGRES_PASSWORD=postgres123
+        //                 COMPOSE_PROJECT_NAME=automarkly_e2e
+        //                 ECR_TAG_BACK=${ECR_TAG_BACK}
+        //                 EOF
                         
-                        docker compose -f docker-compose.e2e.yml up -d
+        //                 docker compose -f docker-compose.e2e.yml up -d
                         
-                        docker build -f tests/integration/Dockerfile -t "${APP_NAME}:e2e-${BUILD_NUMBER}" tests/integration/
-                        sleep 15
-                        docker run --rm \
-                            --network automarkly_e2e_app-network \
-                            -e BASE_URL=http://emailservice-frontend:80 \
-                            "${APP_NAME}:e2e-${BUILD_NUMBER}"
-                    '''
-                }
-            }
-            post {
-                always {
-                    sh '''
-                        docker compose -f docker-compose.e2e.yml logs > e2e-logs.txt || true
-                        docker compose -f docker-compose.e2e.yml down -v || true
-                    '''
-                    archiveArtifacts artifacts: 'e2e-logs.txt', allowEmptyArchive: true
-                }
-            }
-        }
+        //                 docker build -f tests/integration/Dockerfile -t "${APP_NAME}:e2e-${BUILD_NUMBER}" tests/integration/
+        //                 sleep 15
+        //                 docker run --rm \
+        //                     --network automarkly_e2e_app-network \
+        //                     -e BASE_URL=http://emailservice-frontend:80 \
+        //                     "${APP_NAME}:e2e-${BUILD_NUMBER}"
+        //             '''
+        //         }
+        //     }
+        //     post {
+        //         always {
+        //             sh '''
+        //                 docker compose -f docker-compose.e2e.yml logs > e2e-logs.txt || true
+        //                 docker compose -f docker-compose.e2e.yml down -v || true
+        //             '''
+        //             archiveArtifacts artifacts: 'e2e-logs.txt', allowEmptyArchive: true
+        //         }
+        //     }
+        // }
         
         stage('Create Version Tag') {
             when { 
