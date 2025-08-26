@@ -23,6 +23,11 @@ COPY --from=build /app/build .
 # Copy nginx config
 COPY nginx/default.conf /etc/nginx/conf.d/default.conf
 
+# Create nginx cache directories with proper permissions
+RUN mkdir -p /var/cache/nginx/client_temp && \
+    chown -R nginx:nginx /var/cache/nginx && \
+    chmod -R 755 /var/cache/nginx
+
 # Expose port
 EXPOSE 80
 
