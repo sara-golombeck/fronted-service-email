@@ -13,7 +13,6 @@ RUN npm run build
 # Production stage
 FROM nginxinc/nginx-unprivileged:alpine AS production
 WORKDIR /usr/share/nginx/html
-
 # Copy built app
 COPY --from=build /app/build /usr/share/nginx/html/
 
