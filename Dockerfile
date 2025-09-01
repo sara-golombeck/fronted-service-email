@@ -17,6 +17,7 @@ WORKDIR /usr/share/nginx/html
 # Copy built app
 COPY --from=build /app/build /usr/share/nginx/html/
 
+
 # Copy nginx config
 COPY nginx/default.conf /etc/nginx/conf.d/default.conf
 
