@@ -19,6 +19,7 @@ services:
       timeout: 5s
       retries: 5
 
+
   backend:
     image: ${ECR_TAG_BACK}:latest
     container_name: emailservice-backend
