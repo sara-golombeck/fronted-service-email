@@ -1,0 +1,301 @@
+pipeline {
+    agent any
+    
+    environment {
+        APP_NAME = 'automarkly-frontend'
+        BUILD_NUMBER = "${env.BUILD_NUMBER}"
+        AWS_ACCOUNT_ID = credentials('aws-account-id')
+        AWS_REGION = credentials('aws_region')
+        TEST_EMAIL = 'sara.beck.dev@gmail.com'
+        
+        // S3 and CloudFront - from Terraform outputs
+        S3_BUCKET = sh(script: "cd ../../../infra && terraform output -raw s3_static_bucket_name", returnStdout: true).trim()
+        CLOUDFRONT_DISTRIBUTION_ID = sh(script: "cd ../../../infra && terraform output -raw cloudfront_distribution_id", returnStdout: true).trim()
+        CLOUDFRONT_DOMAIN = sh(script: "cd ../../../infra && terraform output -raw cloudfront_domain_name", returnStdout: true).trim()
+        
+        GITOPS_REPO = credentials('gitops-repo-url')
+        HELM_VALUES_PATH = 'charts/email-service/values.yaml'
+        PRODUCTION_URL = credentials('production-url')
+    }
+
+    triggers {
+        githubPush()
+    }
+    
+    stages {
+        stage('Checkout') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'feature/*'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                checkout scm
+                sshagent(['github']) {
+                    sh "git fetch --tags --unshallow || git fetch --tags"
+                }
+            }
+        }
+        
+        stage('Unit Tests') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'feature/*'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                sh '''
+                    docker build -f Dockerfile.test -t "${APP_NAME}:test-${BUILD_NUMBER}" .
+                    mkdir -p test-results
+                    docker run --rm \
+                        -v "${PWD}/test-results:/src/test-results" \
+                        "${APP_NAME}:test-${BUILD_NUMBER}"
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'test-results/**/*', allowEmptyArchive: true
+                }
+            }
+        }
+        
+        stage('Build') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'feature/*'
+                    branch 'release/*'
+                }
+            }
+            parallel {
+                stage('Build Static Files for S3') {
+                    steps {
+                        sh '''
+                            # Build static files
+                            docker build --target s3-build -t "${APP_NAME}:build-${BUILD_NUMBER}" .
+                            
+                            # Extract build files
+                            docker run --rm -v "${PWD}/build:/output" "${APP_NAME}:build-${BUILD_NUMBER}" \
+                                sh -c "cp -r /app/build/* /output/"
+                            
+                            ls -la build/
+                        '''
+                    }
+                }
+                stage('Build Proxy Container') {
+                    steps {
+                        sh '''
+                            # Get CloudFront domain and update nginx config
+                            CLOUDFRONT_DOMAIN=$(cd ../../../infra && terraform output -raw cloudfront_domain_name)
+                            sed -i "s/CLOUDFRONT_DOMAIN/$CLOUDFRONT_DOMAIN/g" nginx/proxy.conf
+                            
+                            # Build proxy container
+                            docker build --build-arg BUILD_TARGET=s3 -t "${APP_NAME}:${BUILD_NUMBER}" .
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Upload to S3 - Staging') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'feature/*'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    sh '''
+                        # Upload to staging path in S3
+                        aws s3 sync build/ s3://${S3_BUCKET}/staging/${BUILD_NUMBER}/ \
+                            --delete \
+                            --cache-control "max-age=31536000" \
+                            --exclude "*.html" \
+                            --exclude "service-worker.js" \
+                            --exclude "manifest.json"
+                        
+                        # Upload HTML files with shorter cache
+                        aws s3 sync build/ s3://${S3_BUCKET}/staging/${BUILD_NUMBER}/ \
+                            --delete \
+                            --cache-control "max-age=0, no-cache, no-store, must-revalidate" \
+                            --include "*.html" \
+                            --include "service-worker.js" \
+                            --include "manifest.json"
+                        
+                        echo "Static files uploaded to: s3://${S3_BUCKET}/staging/${BUILD_NUMBER}/"
+                    '''
+                }
+            }
+        }
+        
+        stage('Run E2E Tests') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'feature/*'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                build job: 'e2e-email-service',
+                      parameters: [
+                          string(name: 'STATIC_FILES_URL', value: "https://${CLOUDFRONT_DOMAIN}/staging/${BUILD_NUMBER}"),
+                          string(name: 'TEST_EMAIL', value: "${TEST_EMAIL}")
+                      ],
+                      wait: true
+            }
+        }
+        
+        stage('Create Version Tag') {
+            when { 
+                anyOf {
+                    branch 'main'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                script {
+                    sh '''
+                        curl -L https://github.com/GitTools/GitVersion/releases/download/6.4.0/gitversion-linux-x64-6.4.0.tar.gz -o gitversion.tar.gz
+                        tar -xzf gitversion.tar.gz
+                        chmod +x gitversion
+                        ./gitversion -showvariable SemVer > version.txt
+                    '''
+                    env.MAIN_TAG = readFile('version.txt').trim()
+                    sh 'rm -f gitversion* version.txt'
+                }
+            }
+        }
+        
+        stage('Deploy to Production S3') {
+            when { 
+                anyOf {
+                    branch 'main'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                retry(3) {
+                    sh '''
+                        # Upload to production path in S3
+                        aws s3 sync build/ s3://${S3_BUCKET}/production/ \
+                            --delete \
+                            --cache-control "max-age=31536000" \
+                            --exclude "*.html" \
+                            --exclude "service-worker.js" \
+                            --exclude "manifest.json"
+                        
+                        # Upload HTML files with shorter cache
+                        aws s3 sync build/ s3://${S3_BUCKET}/production/ \
+                            --delete \
+                            --cache-control "max-age=0, no-cache, no-store, must-revalidate" \
+                            --include "*.html" \
+                            --include "service-worker.js" \
+                            --include "manifest.json"
+                        
+                        # Create CloudFront invalidation
+                        aws cloudfront create-invalidation \
+                            --distribution-id ${CLOUDFRONT_DISTRIBUTION_ID} \
+                            --paths "/*"
+                        
+                        echo "Production deployment completed!"
+                        echo "Static files available at: https://${CLOUDFRONT_DOMAIN}/"
+                    '''
+                }
+            }
+        }
+        
+        stage('Update GitOps') {
+            when { 
+                anyOf {
+                    branch 'main'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                sshagent(['github']) {
+                    sh '''
+                        rm -rf gitops-config
+                        git clone "${GITOPS_REPO}" gitops-config
+                    '''
+                    
+                    withCredentials([
+                        string(credentialsId: 'git-username', variable: 'GIT_USERNAME'),
+                        string(credentialsId: 'git-email', variable: 'GIT_EMAIL')
+                    ]) {
+                        dir('gitops-config') {
+                            sh '''
+                                git config user.email "${GIT_EMAIL}"
+                                git config user.name "${GIT_USERNAME}"
+
+                                # Update frontend version in values.yaml
+                                sed -i '/^  images:/,/^[^ ]/ s/frontend: ".*"/frontend: "'${MAIN_TAG}'"/' "${HELM_VALUES_PATH}"
+                                
+                                if git diff --quiet "${HELM_VALUES_PATH}"; then
+                                    echo "No changes to deploy"
+                                else
+                                    git add "${HELM_VALUES_PATH}"
+                                    git commit -m "Deploy frontend static files v${MAIN_TAG} - Build ${BUILD_NUMBER}"
+                                    git push origin main
+                                fi
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Production Smoke Tests') {
+            when { 
+                anyOf {
+                    branch 'main'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                timeout(time: 2, unit: 'MINUTES') {
+                    sh '''
+                        # Test CloudFront distribution
+                        curl -f "https://${CLOUDFRONT_DOMAIN}/"
+                        
+                        # Test production URL if available
+                        curl -f "${PRODUCTION_URL}/" || echo "Production URL not available yet"
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                def status = currentBuild.result ?: 'SUCCESS'
+                
+                emailext(
+                    to: "${TEST_EMAIL}",
+                    subject: "${APP_NAME} Build #${BUILD_NUMBER} - ${status}",
+                    body: "Pipeline ${status}\\nBuild: #${BUILD_NUMBER}\\nDuration: ${currentBuild.durationString}\\n\\n${BUILD_URL}"
+                )
+            }
+            
+            sh '''
+                docker rmi "${APP_NAME}:test-${BUILD_NUMBER}" || true
+                docker image prune -f || true
+                rm -rf gitops-config build || true
+            '''
+            cleanWs()
+        }
+        success {
+            echo 'Frontend static files pipeline completed successfully!'
+        }
+        failure {
+            echo 'Frontend static files pipeline failed!'
+        }
+    }
+}
