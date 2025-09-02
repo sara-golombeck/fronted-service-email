@@ -35,6 +35,7 @@ WORKDIR /app
 # Copy package files first (for better caching)
 COPY package*.json ./
 
+
 # Install dependencies (npm ci is faster and more reliable than npm install)
 RUN npm ci --silent
 
