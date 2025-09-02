@@ -19,5 +19,6 @@ RUN npm run build
 RUN ls -la build/ && test -d build/static
 
 # Final stage - minimal image with build output
-FROM scratch AS artifacts
+FROM alpine:latest AS artifacts
 COPY --from=builder /app/build /build
+CMD ["sh"]
