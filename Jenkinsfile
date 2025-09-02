@@ -61,12 +61,7 @@ pipeline {
             }
             post {
                 always {
-                    publishTestResults testResultsPattern: 'test-results/*.xml'
-                    publishCoverageReports(
-                        adapters: [
-                            coberturaAdapter('coverage/cobertura-coverage.xml')
-                        ]
-                    )
+                    archiveArtifacts artifacts: 'test-results/**/*,coverage/**/*', allowEmptyArchive: true
                     sh 'docker rmi "${APP_NAME}:test-${BUILD_NUMBER}" || true'
                 }
             }
