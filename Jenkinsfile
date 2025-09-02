@@ -50,27 +50,10 @@ pipeline {
                 sh '''
                     # Build using production Dockerfile
                     docker build --target artifacts -t "${APP_NAME}:artifacts-${BUILD_NUMBER}" .
-                    
-                    # Create temporary container to extract files
                     CONTAINER_ID=$(docker create "${APP_NAME}:artifacts-${BUILD_NUMBER}")
-                    
-                    # Extract build files using docker cp (reliable method)
                     rm -rf build
                     docker cp "${CONTAINER_ID}:/build" ./build
-                    
-                    # Cleanup container
                     docker rm "${CONTAINER_ID}"
-                    
-                    # Verify build output
-                    if [ ! -d "build/static" ]; then
-                        echo "❌ Build verification failed"
-                        ls -la build/ || echo "No build directory"
-                        exit 1
-                    fi
-                    
-                    echo "✅ Build completed successfully"
-                    echo "Build contents:"
-                    find build -type f | head -10
                 '''
             }
             post {
