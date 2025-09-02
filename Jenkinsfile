@@ -49,7 +49,7 @@ pipeline {
             steps {
                 sh '''
                     # Build using production Dockerfile
-                    docker build -f Dockerfile.production --target artifacts -t "${APP_NAME}:artifacts-${BUILD_NUMBER}" .
+                    docker build --target artifacts -t "${APP_NAME}:artifacts-${BUILD_NUMBER}" .
                     
                     # Create temporary container to extract files
                     CONTAINER_ID=$(docker create "${APP_NAME}:artifacts-${BUILD_NUMBER}")
