@@ -86,7 +86,7 @@ pipeline {
                     # Extract build files from container
                     mkdir -p build
                     docker run --rm -v "${PWD}/build:/output" "${APP_NAME}:build-${BUILD_NUMBER}" \
-                        sh -c "cp -r ./build/* /output/ 2>/dev/null || echo 'Copy failed'"
+                        sh -c "ls -la ./build/ && cp -r ./build/. /output/ && echo 'Copy completed'"
                     
                     # Verify build output exists
                     if [ ! -d "build/static" ]; then
