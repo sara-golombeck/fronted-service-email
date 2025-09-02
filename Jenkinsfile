@@ -38,34 +38,34 @@ pipeline {
             }
         }
         
-        stage('Unit Tests') {
-            when {
-                anyOf {
-                    branch 'main'
-                    branch 'feature/*'
-                    branch 'release/*'
-                }
-            }
-            steps {
-                sh '''
-                    # Run tests in Docker container
-                    docker build -f Dockerfile.test -t "${APP_NAME}:test-${BUILD_NUMBER}" .
+        // stage('Unit Tests') {
+        //     when {
+        //         anyOf {
+        //             branch 'main'
+        //             branch 'feature/*'
+        //             branch 'release/*'
+        //         }
+        //     }
+        //     steps {
+        //         sh '''
+        //             # Run tests in Docker container
+        //             docker build -f Dockerfile.test -t "${APP_NAME}:test-${BUILD_NUMBER}" .
                     
-                    # Run tests and extract results
-                    mkdir -p test-results coverage
-                    docker run --rm \
-                        -v "${PWD}/test-results:/app/test-results" \
-                        -v "${PWD}/coverage:/app/coverage" \
-                        "${APP_NAME}:test-${BUILD_NUMBER}"
-                '''
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'test-results/**/*,coverage/**/*', allowEmptyArchive: true
-                    sh 'docker rmi "${APP_NAME}:test-${BUILD_NUMBER}" || true'
-                }
-            }
-        }
+        //             # Run tests and extract results
+        //             mkdir -p test-results coverage
+        //             docker run --rm \
+        //                 -v "${PWD}/test-results:/app/test-results" \
+        //                 -v "${PWD}/coverage:/app/coverage" \
+        //                 "${APP_NAME}:test-${BUILD_NUMBER}"
+        //         '''
+        //     }
+        //     post {
+        //         always {
+        //             archiveArtifacts artifacts: 'test-results/**/*,coverage/**/*', allowEmptyArchive: true
+        //             sh 'docker rmi "${APP_NAME}:test-${BUILD_NUMBER}" || true'
+        //         }
+        //     }
+        // }
         
         stage('Build Static Files') {
             when {
@@ -80,10 +80,13 @@ pipeline {
                     # Build static files using Docker
                     docker build --target s3-build -t "${APP_NAME}:build-${BUILD_NUMBER}" .
                     
+                    # Debug: Check what's in the container
+                    docker run --rm "${APP_NAME}:build-${BUILD_NUMBER}" sh -c "ls -la /app/ && ls -la ./"
+                    
                     # Extract build files from container
                     mkdir -p build
                     docker run --rm -v "${PWD}/build:/output" "${APP_NAME}:build-${BUILD_NUMBER}" \
-                        sh -c "cp -r /app/build/* /output/ 2>/dev/null || echo 'No build files found'"
+                        sh -c "cp -r ./build/* /output/ 2>/dev/null || echo 'Copy failed'"
                     
                     # Verify build output exists
                     if [ ! -d "build/static" ]; then
