@@ -1,0 +1,44 @@
+pipeline {
+    agent any
+    
+    environment {
+        APP_NAME = 'automarkly-frontend'
+        BUILD_NUMBER = "${env.BUILD_NUMBER}"
+        S3_BUCKET = credentials('s3-static-bucket')
+        CLOUDFRONT_DISTRIBUTION_ID = credentials('cloudfront-distribution-id')
+        CLOUDFRONT_DOMAIN = credentials('cloudfront-domain')
+    }
+    
+    stages {
+        stage('Build Static Files') {
+            steps {
+                script {
+                    sh '''
+                        # Build the Docker image
+                        docker build --target artifacts \
+                            -t ${APP_NAME}:build-${BUILD_NUMBER} .
+                        
+                        # Create temporary container (doesn't run it)
+                        CONTAINER_ID=$(docker create ${APP_NAME}:build-${BUILD_NUMBER})
+                        
+                        # Extract files using docker cp (BEST PRACTICE)
+                        rm -rf build
+                        docker cp ${CONTAINER_ID}:/build ./build
+                        
+                        # Clean up container
+                        docker rm ${CONTAINER_ID}
+                        
+                        # Verify extraction
+                        if [ ! -d "build/static" ]; then
+                            echo "❌ Build extraction failed"
+                            exit 1
+                        fi
+                        
+                        echo "✅ Extracted $(find build -type f | wc -l) files"
+                        echo "📦 Total size: $(du -sh build | cut -f1)"
+                    '''
+                }
+            }
+        }
+    }
+}

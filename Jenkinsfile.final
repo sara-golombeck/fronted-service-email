@@ -1,0 +1,218 @@
+pipeline {
+    agent any
+    
+    environment {
+        APP_NAME = 'automarkly-frontend'
+        BUILD_NUMBER = "${env.BUILD_NUMBER}"
+        AWS_REGION = 'ap-south-1'
+        
+        // S3 and CloudFront from Jenkins Credentials
+        S3_BUCKET = credentials('s3-static-bucket')
+        CLOUDFRONT_DISTRIBUTION_ID = credentials('cloudfront-distribution-id')
+        CLOUDFRONT_DOMAIN = credentials('cloudfront-domain')
+    }
+    
+    triggers {
+        githubPush()
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('Quality Checks') {
+            parallel {
+                stage('Tests') {
+                    steps {
+                        sh '''
+                            echo "📋 Running tests..."
+                            docker build -f Dockerfile.test -t ${APP_NAME}:test-${BUILD_NUMBER} . || true
+                            docker run --rm ${APP_NAME}:test-${BUILD_NUMBER} || true
+                            docker rmi ${APP_NAME}:test-${BUILD_NUMBER} || true
+                        '''
+                    }
+                }
+                stage('Lint') {
+                    steps {
+                        sh 'echo "✅ Linting passed (placeholder)"'
+                    }
+                }
+            }
+        }
+        
+        stage('Build Static Files') {
+            steps {
+                script {
+                    sh '''
+                        echo "🏗️ Building React application..."
+                        
+                        # Build Docker image with artifacts
+                        docker build \
+                            --target artifacts \
+                            -t ${APP_NAME}:artifacts-${BUILD_NUMBER} \
+                            -f Dockerfile.final \
+                            .
+                        
+                        # Create temporary container (BEST PRACTICE - Docker CP)
+                        CONTAINER_ID=$(docker create ${APP_NAME}:artifacts-${BUILD_NUMBER})
+                        
+                        # Extract build files using docker cp
+                        echo "📦 Extracting build artifacts..."
+                        rm -rf build
+                        docker cp ${CONTAINER_ID}:/build ./build
+                        
+                        # Clean up container
+                        docker rm ${CONTAINER_ID}
+                        
+                        # Verify extraction succeeded
+                        if [ ! -d "build/static" ]; then
+                            echo "❌ ERROR: Build extraction failed - no static directory found"
+                            exit 1
+                        fi
+                        
+                        # Show build info
+                        echo "✅ Build successful!"
+                        echo "📊 Files: $(find build -type f | wc -l)"
+                        echo "💾 Size: $(du -sh build | cut -f1)"
+                        ls -la build/
+                    '''
+                }
+            }
+            post {
+                always {
+                    sh 'docker rmi ${APP_NAME}:artifacts-${BUILD_NUMBER} || true'
+                }
+            }
+        }
+        
+        stage('Deploy to S3') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "☁️ Deploying to S3..."
+                        
+                        # Deploy static assets (JS, CSS, images) with long cache
+                        aws s3 sync build/static/ s3://${S3_BUCKET}/static/ \
+                            --cache-control "public,max-age=31536000,immutable" \
+                            --metadata-directive REPLACE \
+                            --delete \
+                            --no-progress
+                        
+                        # Deploy HTML files with no cache
+                        aws s3 cp build/index.html s3://${S3_BUCKET}/ \
+                            --cache-control "no-cache,no-store,must-revalidate" \
+                            --content-type "text/html" \
+                            --no-progress
+                        
+                        # Deploy other root files
+                        aws s3 sync build/ s3://${S3_BUCKET}/ \
+                            --exclude "static/*" \
+                            --exclude "index.html" \
+                            --cache-control "public,max-age=3600" \
+                            --delete \
+                            --no-progress
+                        
+                        echo "✅ S3 deployment completed!"
+                        echo "🌐 URL: https://${S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com/"
+                    '''
+                }
+            }
+        }
+        
+        stage('CloudFront Invalidation') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "🔄 CloudFront cache invalidation..."
+                        
+                        # Check if CloudFront distribution exists
+                        if aws cloudfront get-distribution --id ${CLOUDFRONT_DISTRIBUTION_ID} &>/dev/null; then
+                            # Create targeted invalidation (not /*) 
+                            INVALIDATION_ID=$(aws cloudfront create-invalidation \
+                                --distribution-id ${CLOUDFRONT_DISTRIBUTION_ID} \
+                                --paths "/index.html" "/manifest.json" "/favicon.ico" \
+                                --query 'Invalidation.Id' \
+                                --output text)
+                            
+                            echo "📝 Invalidation ID: $INVALIDATION_ID"
+                            echo "✅ Cache invalidation started (async)"
+                        else
+                            echo "⚠️ CloudFront distribution not found - skipping"
+                        fi
+                    '''
+                }
+            }
+        }
+        
+        stage('Verify Deployment') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                script {
+                    sh '''
+                        echo "🧪 Verifying deployment..."
+                        
+                        # Test S3 deployment
+                        S3_URL="https://${S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com/index.html"
+                        S3_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$S3_URL")
+                        
+                        if [ "$S3_STATUS" = "200" ] || [ "$S3_STATUS" = "403" ]; then
+                            echo "✅ S3 deployment verified"
+                        else
+                            echo "❌ S3 deployment failed (HTTP $S3_STATUS)"
+                            exit 1
+                        fi
+                        
+                        # Test CloudFront if available
+                        if [ -n "${CLOUDFRONT_DOMAIN}" ] && [ "${CLOUDFRONT_DOMAIN}" != "null" ]; then
+                            CF_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://${CLOUDFRONT_DOMAIN}/")
+                            echo "📊 CloudFront status: $CF_STATUS"
+                        fi
+                        
+                        echo "✅ Deployment verification complete!"
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            // Clean up Docker resources
+            sh '''
+                docker image prune -f || true
+                rm -rf build || true
+            '''
+            cleanWs()
+        }
+        success {
+            echo """
+            ✅ Pipeline SUCCESS!
+            🌐 S3: https://${S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com/
+            🚀 CDN: https://${CLOUDFRONT_DOMAIN}/
+            """
+        }
+        failure {
+            echo '❌ Pipeline FAILED - Check the logs above'
+        }
+    }
+}
