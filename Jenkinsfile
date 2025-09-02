@@ -83,9 +83,14 @@ pipeline {
                     # Extract build files from container
                     mkdir -p build
                     docker run --rm -v "${PWD}/build:/output" "${APP_NAME}:build-${BUILD_NUMBER}" \
-                        sh -c "cp -r /app/build/* /output/"
+                        sh -c "cp -r /app/build/* /output/ 2>/dev/null || echo 'No build files found'"
                     
-                    # Verify build output
+                    # Verify build output exists
+                    if [ ! -d "build/static" ]; then
+                        echo "❌ Build failed - no static files generated"
+                        exit 1
+                    fi
+                    
                     ls -la build/
                     echo "✅ Docker build completed successfully"
                 '''
@@ -104,6 +109,10 @@ pipeline {
                     branch 'feature/*'
                     branch 'release/*'
                 }
+            }
+            // Ensure build completed successfully
+            when {
+                expression { fileExists('build/static') }
             }
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
