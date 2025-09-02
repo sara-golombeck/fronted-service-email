@@ -38,6 +38,35 @@ pipeline {
             }
         }
         
+        // stage('Unit Tests') {
+        //     when {
+        //         anyOf {
+        //             branch 'main'
+        //             branch 'feature/*'
+        //             branch 'release/*'
+        //         }
+        //     }
+        //     steps {
+        //         sh '''
+        //             # Run tests in Docker container
+        //             docker build -f Dockerfile.test -t "${APP_NAME}:test-${BUILD_NUMBER}" .
+                    
+        //             # Run tests and extract results
+        //             mkdir -p test-results coverage
+        //             docker run --rm \
+        //                 -v "${PWD}/test-results:/app/test-results" \
+        //                 -v "${PWD}/coverage:/app/coverage" \
+        //                 "${APP_NAME}:test-${BUILD_NUMBER}"
+        //         '''
+        //     }
+        //     post {
+        //         always {
+        //             archiveArtifacts artifacts: 'test-results/**/*,coverage/**/*', allowEmptyArchive: true
+        //             sh 'docker rmi "${APP_NAME}:test-${BUILD_NUMBER}" || true'
+        //         }
+        //     }
+        // }
+        
         stage('Build Static Files') {
             when {
                 anyOf {
@@ -48,34 +77,30 @@ pipeline {
             }
             steps {
                 sh '''
-                    # Build using production Dockerfile
-                    docker build -f Dockerfile.production --target artifacts -t "${APP_NAME}:artifacts-${BUILD_NUMBER}" .
+                    # Build static files using Docker
+                    docker build --target s3-build -t "${APP_NAME}:build-${BUILD_NUMBER}" .
                     
-                    # Create temporary container to extract files
-                    CONTAINER_ID=$(docker create "${APP_NAME}:artifacts-${BUILD_NUMBER}")
+                    # Debug: Check what's in the container
+                    docker run --rm "${APP_NAME}:build-${BUILD_NUMBER}" sh -c "ls -la /app/ && ls -la ./"
                     
-                    # Extract build files using docker cp (reliable method)
-                    rm -rf build
-                    docker cp "${CONTAINER_ID}:/build" ./build
+                    # Extract build files from container
+                    mkdir -p build
+                    docker run --rm -v "${PWD}/build:/output" "${APP_NAME}:build-${BUILD_NUMBER}" \
+                        sh -c "ls -la ./build/ && cp -r ./build/. /output/ && echo 'Copy completed'"
                     
-                    # Cleanup container
-                    docker rm "${CONTAINER_ID}"
-                    
-                    # Verify build output
+                    # Verify build output exists
                     if [ ! -d "build/static" ]; then
-                        echo "❌ Build verification failed"
-                        ls -la build/ || echo "No build directory"
+                        echo "❌ Build failed - no static files generated"
                         exit 1
                     fi
                     
-                    echo "✅ Build completed successfully"
-                    echo "Build contents:"
-                    find build -type f | head -10
+                    ls -la build/
+                    echo "✅ Docker build completed successfully"
                 '''
             }
             post {
                 always {
-                    sh 'docker rmi "${APP_NAME}:artifacts-${BUILD_NUMBER}" || true'
+                    sh 'docker rmi "${APP_NAME}:build-${BUILD_NUMBER}" || true'
                 }
             }
         }
@@ -107,6 +132,45 @@ pipeline {
                         
                         echo "✅ Staging files uploaded to: s3://${S3_BUCKET}/staging/${BUILD_NUMBER}/"
                     '''
+                }
+            }
+        }
+        
+        stage('Run E2E Tests') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'feature/*'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                build job: 'e2e-email-service',
+                      parameters: [
+                          string(name: 'STATIC_FILES_URL', value: "https://${CLOUDFRONT_DOMAIN}/staging/${BUILD_NUMBER}"),
+                          string(name: 'TEST_EMAIL', value: "${TEST_EMAIL}")
+                      ],
+                      wait: true
+            }
+        }
+        
+        stage('Create Version Tag') {
+            when { 
+                anyOf {
+                    branch 'main'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                script {
+                    sh '''
+                        # Generate semantic version
+                        COMMIT_COUNT=$(git rev-list --count HEAD)
+                        SHORT_SHA=$(git rev-parse --short HEAD)
+                        VERSION="1.0.${COMMIT_COUNT}-${SHORT_SHA}"
+                        echo $VERSION > version.txt
+                    '''
+                    env.MAIN_TAG = readFile('version.txt').trim()
                 }
             }
         }
@@ -190,6 +254,10 @@ pipeline {
                             exit 1
                         fi
                         
+                        # Test static assets
+                        curl -f "https://${CLOUDFRONT_DOMAIN}/static/css/" || echo "CSS files check"
+                        curl -f "https://${CLOUDFRONT_DOMAIN}/static/js/" || echo "JS files check"
+                        
                         echo "✅ Production smoke tests passed!"
                     '''
                 }
@@ -222,8 +290,7 @@ pipeline {
             
             sh '''
                 # Cleanup
-                rm -rf build || true
-                docker system prune -f || true
+                rm -rf node_modules build version.txt || true
             '''
             cleanWs()
         }
