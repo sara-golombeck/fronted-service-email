@@ -104,15 +104,14 @@ pipeline {
         
         stage('Upload to S3 - Staging') {
             when {
-                anyOf {
-                    branch 'main'
-                    branch 'feature/*'
-                    branch 'release/*'
+                allOf {
+                    anyOf {
+                        branch 'main'
+                        branch 'feature/*'
+                        branch 'release/*'
+                    }
+                    expression { fileExists('build/static') }
                 }
-            }
-            // Ensure build completed successfully
-            when {
-                expression { fileExists('build/static') }
             }
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
