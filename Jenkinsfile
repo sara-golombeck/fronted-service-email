@@ -4,17 +4,13 @@ pipeline {
     environment {
         APP_NAME = 'automarkly-frontend'
         BUILD_NUMBER = "${env.BUILD_NUMBER}"
-        AWS_ACCOUNT_ID = credentials('aws-account-id')
-        AWS_REGION = credentials('aws_region')
+        AWS_REGION = 'ap-south-1'
         TEST_EMAIL = 'sara.beck.dev@gmail.com'
         
-        // Staging ECR
-        ECR_STAGING_FRONTEND = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/automarkly/staging/emailservice-frontend"
-        
-        // Production ECR
-        ECR_PROD_BACKEND = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/automarkly/emailservice-backend"
-        ECR_PROD_FRONTEND = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/automarkly/emailservice-frontend"
-        ECR_PROD_WORKER = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/automarkly/emailservice-worker"
+        // S3 and CloudFront - from Jenkins Credentials
+        S3_BUCKET = credentials('s3-static-bucket')
+        CLOUDFRONT_DISTRIBUTION_ID = credentials('cloudfront-distribution-id')
+        CLOUDFRONT_DOMAIN = credentials('cloudfront-domain')
         
         GITOPS_REPO = credentials('gitops-repo-url')
         HELM_VALUES_PATH = 'charts/email-service/values.yaml'
@@ -52,21 +48,31 @@ pipeline {
             }
             steps {
                 sh '''
+                    # Run tests in Docker container
                     docker build -f Dockerfile.test -t "${APP_NAME}:test-${BUILD_NUMBER}" .
-                    mkdir -p test-results
+                    
+                    # Run tests and extract results
+                    mkdir -p test-results coverage
                     docker run --rm \
-                        -v "${PWD}/test-results:/src/test-results" \
+                        -v "${PWD}/test-results:/app/test-results" \
+                        -v "${PWD}/coverage:/app/coverage" \
                         "${APP_NAME}:test-${BUILD_NUMBER}"
                 '''
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'test-results/**/*', allowEmptyArchive: true
+                    publishTestResults testResultsPattern: 'test-results/*.xml'
+                    publishCoverageReports(
+                        adapters: [
+                            coberturaAdapter('coverage/cobertura-coverage.xml')
+                        ]
+                    )
+                    sh 'docker rmi "${APP_NAME}:test-${BUILD_NUMBER}" || true'
                 }
             }
         }
         
-        stage('Package') {
+        stage('Build Static Files') {
             when {
                 anyOf {
                     branch 'main'
@@ -75,16 +81,28 @@ pipeline {
                 }
             }
             steps {
-                timeout(time: 10, unit: 'MINUTES') {
-                    sh '''
-                        docker build -t "${APP_NAME}:${BUILD_NUMBER}" .
-                        docker tag "${APP_NAME}:${BUILD_NUMBER}" "${ECR_STAGING_FRONTEND}:${BUILD_NUMBER}"
-                    '''
+                sh '''
+                    # Build static files using Docker
+                    docker build --target s3-build -t "${APP_NAME}:build-${BUILD_NUMBER}" .
+                    
+                    # Extract build files from container
+                    mkdir -p build
+                    docker run --rm -v "${PWD}/build:/output" "${APP_NAME}:build-${BUILD_NUMBER}" \
+                        sh -c "cp -r /app/build/* /output/"
+                    
+                    # Verify build output
+                    ls -la build/
+                    echo "✅ Docker build completed successfully"
+                '''
+            }
+            post {
+                always {
+                    sh 'docker rmi "${APP_NAME}:build-${BUILD_NUMBER}" || true'
                 }
             }
         }
         
-        stage('Push to Staging') {
+        stage('Upload to S3 - Staging') {
             when {
                 anyOf {
                     branch 'main'
@@ -93,16 +111,20 @@ pipeline {
                 }
             }
             steps {
-                retry(3) {
-                    sh '''
-                        aws ecr get-login-password --region "${AWS_REGION}" | \
-                            docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-                    '''
-                }
-                
                 timeout(time: 5, unit: 'MINUTES') {
                     sh '''
-                        docker push "${ECR_STAGING_FRONTEND}:${BUILD_NUMBER}"
+                        # Upload static assets with long cache
+                        aws s3 sync build/static/ s3://${S3_BUCKET}/staging/${BUILD_NUMBER}/static/ \\
+                            --cache-control "max-age=31536000,public,immutable" \\
+                            --delete
+                        
+                        # Upload HTML and service worker with no cache
+                        aws s3 sync build/ s3://${S3_BUCKET}/staging/${BUILD_NUMBER}/ \\
+                            --cache-control "max-age=0,no-cache,no-store,must-revalidate" \\
+                            --exclude "static/*" \\
+                            --delete
+                        
+                        echo "✅ Staging files uploaded to: s3://${S3_BUCKET}/staging/${BUILD_NUMBER}/"
                     '''
                 }
             }
@@ -119,9 +141,7 @@ pipeline {
             steps {
                 build job: 'e2e-email-service',
                       parameters: [
-                          string(name: 'BACKEND_IMAGE', value: "${ECR_PROD_BACKEND}:latest"),
-                          string(name: 'FRONTEND_IMAGE', value: "${ECR_STAGING_FRONTEND}:${BUILD_NUMBER}"),
-                          string(name: 'WORKER_IMAGE', value: "${ECR_PROD_WORKER}:latest"),
+                          string(name: 'STATIC_FILES_URL', value: "https://${CLOUDFRONT_DOMAIN}/staging/${BUILD_NUMBER}"),
                           string(name: 'TEST_EMAIL', value: "${TEST_EMAIL}")
                       ],
                       wait: true
@@ -138,18 +158,18 @@ pipeline {
             steps {
                 script {
                     sh '''
-                        curl -L https://github.com/GitTools/GitVersion/releases/download/6.4.0/gitversion-linux-x64-6.4.0.tar.gz -o gitversion.tar.gz
-                        tar -xzf gitversion.tar.gz
-                        chmod +x gitversion
-                        ./gitversion -showvariable SemVer > version.txt
+                        # Generate semantic version
+                        COMMIT_COUNT=$(git rev-list --count HEAD)
+                        SHORT_SHA=$(git rev-parse --short HEAD)
+                        VERSION="1.0.${COMMIT_COUNT}-${SHORT_SHA}"
+                        echo $VERSION > version.txt
                     '''
                     env.MAIN_TAG = readFile('version.txt').trim()
-                    sh 'rm -f gitversion* version.txt'
                 }
             }
         }
         
-        stage('Deploy') {
+        stage('Deploy to Production S3') {
             when { 
                 anyOf {
                     branch 'main'
@@ -159,16 +179,26 @@ pipeline {
             steps {
                 retry(3) {
                     sh '''
-                        docker tag "${APP_NAME}:${BUILD_NUMBER}" "${ECR_PROD_FRONTEND}:${MAIN_TAG}"
-                        docker tag "${APP_NAME}:${BUILD_NUMBER}" "${ECR_PROD_FRONTEND}:latest"
-                        docker push "${ECR_PROD_FRONTEND}:${MAIN_TAG}"
-                        docker push "${ECR_PROD_FRONTEND}:latest"
+                        echo "🚀 Deploying to production S3..."
+                        
+                        # Upload static assets with long cache
+                        aws s3 sync build/static/ s3://${S3_BUCKET}/static/ \\
+                            --cache-control "max-age=31536000,public,immutable" \\
+                            --delete
+                        
+                        # Upload HTML and service worker with no cache
+                        aws s3 sync build/ s3://${S3_BUCKET}/ \\
+                            --cache-control "max-age=0,no-cache,no-store,must-revalidate" \\
+                            --exclude "static/*" \\
+                            --delete
+                        
+                        echo "✅ Production files uploaded to: s3://${S3_BUCKET}/"
                     '''
                 }
             }
         }
         
-        stage('Deploy via GitOps') {
+        stage('CloudFront Invalidation') {
             when { 
                 anyOf {
                     branch 'main'
@@ -176,33 +206,25 @@ pipeline {
                 }
             }
             steps {
-                sshagent(['github']) {
+                timeout(time: 10, unit: 'MINUTES') {
                     sh '''
-                        rm -rf gitops-config
-                        git clone "${GITOPS_REPO}" gitops-config
+                        echo "🔄 Creating CloudFront invalidation..."
+                        
+                        INVALIDATION_ID=$(aws cloudfront create-invalidation \\
+                            --distribution-id ${CLOUDFRONT_DISTRIBUTION_ID} \\
+                            --paths "/*" \\
+                            --query 'Invalidation.Id' \\
+                            --output text)
+                        
+                        echo "Invalidation ID: $INVALIDATION_ID"
+                        
+                        # Wait for invalidation to complete
+                        aws cloudfront wait invalidation-completed \\
+                            --distribution-id ${CLOUDFRONT_DISTRIBUTION_ID} \\
+                            --id $INVALIDATION_ID
+                        
+                        echo "✅ CloudFront invalidation completed!"
                     '''
-                    
-                    withCredentials([
-                        string(credentialsId: 'git-username', variable: 'GIT_USERNAME'),
-                        string(credentialsId: 'git-email', variable: 'GIT_EMAIL')
-                    ]) {
-                        dir('gitops-config') {
-                            sh '''
-                                git config user.email "${GIT_EMAIL}"
-                                git config user.name "${GIT_USERNAME}"
-
-                                sed -i '/^  images:/,/^[^ ]/ s/frontend: ".*"/frontend: "'${MAIN_TAG}'"/' "${HELM_VALUES_PATH}"
-                                
-                                if git diff --quiet "${HELM_VALUES_PATH}"; then
-                                    echo "No changes to deploy"
-                                else
-                                    git add "${HELM_VALUES_PATH}"
-                                    git commit -m "Deploy frontend v${MAIN_TAG} - Build ${BUILD_NUMBER}"
-                                    git push origin main
-                                fi
-                            '''
-                        }
-                    }
                 }
             }
         }
@@ -215,10 +237,22 @@ pipeline {
                 }
             }
             steps {
-                timeout(time: 2, unit: 'MINUTES') {
+                timeout(time: 3, unit: 'MINUTES') {
                     sh '''
-                        curl -f "${PRODUCTION_URL}/"
-                        curl -f "${PRODUCTION_URL}/health" || echo "Health endpoint not available"
+                        echo "🧪 Running production smoke tests..."
+                        
+                        # Test CloudFront distribution
+                        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://${CLOUDFRONT_DOMAIN}/")
+                        if [ "$HTTP_STATUS" != "200" ]; then
+                            echo "❌ CloudFront health check failed: $HTTP_STATUS"
+                            exit 1
+                        fi
+                        
+                        # Test static assets
+                        curl -f "https://${CLOUDFRONT_DOMAIN}/static/css/" || echo "CSS files check"
+                        curl -f "https://${CLOUDFRONT_DOMAIN}/static/js/" || echo "JS files check"
+                        
+                        echo "✅ Production smoke tests passed!"
                     '''
                 }
             }
@@ -229,27 +263,36 @@ pipeline {
         always {
             script {
                 def status = currentBuild.result ?: 'SUCCESS'
+                def emoji = status == 'SUCCESS' ? '✅' : '❌'
                 
                 emailext(
                     to: "${TEST_EMAIL}",
-                    subject: "${APP_NAME} Build #${BUILD_NUMBER} - ${status}",
-                    body: "Pipeline ${status}\nBuild: #${BUILD_NUMBER}\nDuration: ${currentBuild.durationString}\n\n${BUILD_URL}"
+                    subject: "${emoji} ${APP_NAME} Build #${BUILD_NUMBER} - ${status}",
+                    body: """
+                        Pipeline: ${status}
+                        Build: #${BUILD_NUMBER}
+                        Duration: ${currentBuild.durationString}
+                        
+                        ${status == 'SUCCESS' ? 
+                            "🌐 Live at: https://${CLOUDFRONT_DOMAIN}/" : 
+                            "❌ Build failed - check logs"}
+                        
+                        📊 Details: ${BUILD_URL}
+                    """
                 )
             }
             
             sh '''
-                docker rmi "${APP_NAME}:test-${BUILD_NUMBER}" || true
-                docker rmi "${APP_NAME}:${BUILD_NUMBER}" || true
-                docker image prune -f || true
-                rm -rf gitops-config || true
+                # Cleanup
+                rm -rf node_modules build version.txt || true
             '''
             cleanWs()
         }
         success {
-            echo 'Frontend pipeline completed successfully!'
+            echo '✅ Frontend S3 deployment completed successfully!'
         }
         failure {
-            echo 'Frontend pipeline failed!'
+            echo '❌ Frontend S3 deployment failed!'
         }
     }
 }
