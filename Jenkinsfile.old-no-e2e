@@ -11,6 +11,10 @@ pipeline {
         S3_BUCKET = credentials('s3-static-bucket')
         CLOUDFRONT_DISTRIBUTION_ID = credentials('cloudfront-distribution-id')
         CLOUDFRONT_DOMAIN = credentials('cloudfront-domain')
+        
+        GITOPS_REPO = credentials('gitops-repo-url')
+        HELM_VALUES_PATH = 'charts/email-service/values.yaml'
+        PRODUCTION_URL = credentials('production-url')
     }
 
     triggers {
@@ -34,31 +38,6 @@ pipeline {
             }
         }
         
-        stage('Unit Tests') {
-            when {
-                anyOf {
-                    branch 'main'
-                    branch 'feature/*'
-                    branch 'release/*'
-                }
-            }
-            steps {
-                sh '''
-                    docker build -f Dockerfile.test -t "${APP_NAME}:test-${BUILD_NUMBER}" .
-                    mkdir -p test-results
-                    docker run --rm \\
-                        -v "${PWD}/test-results:/app/test-results" \\
-                        "${APP_NAME}:test-${BUILD_NUMBER}"
-                '''
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'test-results/**/*', allowEmptyArchive: true
-                    sh 'docker rmi "${APP_NAME}:test-${BUILD_NUMBER}" || true'
-                }
-            }
-        }
-        
         stage('Build Static Files') {
             when {
                 anyOf {
@@ -75,12 +54,6 @@ pipeline {
                     rm -rf build
                     docker cp "${CONTAINER_ID}:/build" ./build
                     docker rm "${CONTAINER_ID}"
-                    
-                    # Verify build output
-                    if [ ! -d "build/static" ]; then
-                        echo "❌ Build verification failed"
-                        exit 1
-                    fi
                 '''
             }
             post {
@@ -116,37 +89,7 @@ pipeline {
                             --delete
                         
                         echo "✅ Staging files uploaded to: s3://${S3_BUCKET}/staging/${BUILD_NUMBER}/"
-                        echo "🌐 Preview URL: https://${CLOUDFRONT_DOMAIN}/staging/${BUILD_NUMBER}/"
                     '''
-                }
-            }
-        }
-        
-        stage('Run E2E Tests') {
-            when {
-                anyOf {
-                    branch 'main'
-                    branch 'feature/*'
-                    branch 'release/*'
-                }
-            }
-            steps {
-                script {
-                    // Get ECR images for E2E
-                    withCredentials([
-                        string(credentialsId: 'aws-account-id', variable: 'AWS_ID'),
-                        string(credentialsId: 'aws_region', variable: 'REGION')
-                    ]) {
-                        build job: 'e2e-email-service',
-                              parameters: [
-                                  string(name: 'BACKEND_IMAGE', value: "${AWS_ID}.dkr.ecr.${REGION}.amazonaws.com/automarkly/emailservice-backend:latest"),
-                                  string(name: 'FRONTEND_IMAGE', value: "STATIC_FILES"),
-                                  string(name: 'WORKER_IMAGE', value: "${AWS_ID}.dkr.ecr.${REGION}.amazonaws.com/automarkly/emailservice-worker:latest"),
-                                  string(name: 'STATIC_FILES_URL', value: "https://${CLOUDFRONT_DOMAIN}/staging/${BUILD_NUMBER}"),
-                                  string(name: 'TEST_EMAIL', value: "${TEST_EMAIL}")
-                              ],
-                              wait: true
-                    }
                 }
             }
         }

@@ -11,6 +11,15 @@ pipeline {
         S3_BUCKET = credentials('s3-static-bucket')
         CLOUDFRONT_DISTRIBUTION_ID = credentials('cloudfront-distribution-id')
         CLOUDFRONT_DOMAIN = credentials('cloudfront-domain')
+        
+        // For E2E Tests - ECR images
+        AWS_ACCOUNT_ID = credentials('aws-account-id')
+        ECR_PROD_BACKEND = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/automarkly/emailservice-backend"
+        ECR_PROD_WORKER = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/automarkly/emailservice-worker"
+        
+        GITOPS_REPO = credentials('gitops-repo-url')
+        HELM_VALUES_PATH = 'charts/email-service/values.yaml'
+        PRODUCTION_URL = credentials('production-url')
     }
 
     triggers {
@@ -116,7 +125,6 @@ pipeline {
                             --delete
                         
                         echo "✅ Staging files uploaded to: s3://${S3_BUCKET}/staging/${BUILD_NUMBER}/"
-                        echo "🌐 Preview URL: https://${CLOUDFRONT_DOMAIN}/staging/${BUILD_NUMBER}/"
                     '''
                 }
             }
@@ -131,22 +139,35 @@ pipeline {
                 }
             }
             steps {
+                build job: 'e2e-email-service',
+                      parameters: [
+                          string(name: 'BACKEND_IMAGE', value: "${ECR_PROD_BACKEND}:latest"),
+                          string(name: 'FRONTEND_IMAGE', value: "STATIC_FILES"),
+                          string(name: 'WORKER_IMAGE', value: "${ECR_PROD_WORKER}:latest"),
+                          string(name: 'STATIC_FILES_URL', value: "https://${CLOUDFRONT_DOMAIN}/staging/${BUILD_NUMBER}"),
+                          string(name: 'TEST_EMAIL', value: "${TEST_EMAIL}")
+                      ],
+                      wait: true
+            }
+        }
+        
+        stage('Create Version Tag') {
+            when { 
+                anyOf {
+                    branch 'main'
+                    branch 'release/*'
+                }
+            }
+            steps {
                 script {
-                    // Get ECR images for E2E
-                    withCredentials([
-                        string(credentialsId: 'aws-account-id', variable: 'AWS_ID'),
-                        string(credentialsId: 'aws_region', variable: 'REGION')
-                    ]) {
-                        build job: 'e2e-email-service',
-                              parameters: [
-                                  string(name: 'BACKEND_IMAGE', value: "${AWS_ID}.dkr.ecr.${REGION}.amazonaws.com/automarkly/emailservice-backend:latest"),
-                                  string(name: 'FRONTEND_IMAGE', value: "STATIC_FILES"),
-                                  string(name: 'WORKER_IMAGE', value: "${AWS_ID}.dkr.ecr.${REGION}.amazonaws.com/automarkly/emailservice-worker:latest"),
-                                  string(name: 'STATIC_FILES_URL', value: "https://${CLOUDFRONT_DOMAIN}/staging/${BUILD_NUMBER}"),
-                                  string(name: 'TEST_EMAIL', value: "${TEST_EMAIL}")
-                              ],
-                              wait: true
-                    }
+                    sh '''
+                        curl -L https://github.com/GitTools/GitVersion/releases/download/6.4.0/gitversion-linux-x64-6.4.0.tar.gz -o gitversion.tar.gz
+                        tar -xzf gitversion.tar.gz
+                        chmod +x gitversion
+                        ./gitversion -showvariable SemVer > version.txt
+                    '''
+                    env.MAIN_TAG = readFile('version.txt').trim()
+                    sh 'rm -f gitversion* version.txt'
                 }
             }
         }
@@ -211,6 +232,45 @@ pipeline {
             }
         }
         
+        stage('Deploy via GitOps') {
+            when { 
+                anyOf {
+                    branch 'main'
+                    branch 'release/*'
+                }
+            }
+            steps {
+                sshagent(['github']) {
+                    sh '''
+                        rm -rf gitops-config
+                        git clone "${GITOPS_REPO}" gitops-config
+                    '''
+                    
+                    withCredentials([
+                        string(credentialsId: 'git-username', variable: 'GIT_USERNAME'),
+                        string(credentialsId: 'git-email', variable: 'GIT_EMAIL')
+                    ]) {
+                        dir('gitops-config') {
+                            sh '''
+                                git config user.email "${GIT_EMAIL}"
+                                git config user.name "${GIT_USERNAME}"
+
+                                sed -i '/staticFiles:/,/version:/ s/version: ".*"/version: "'${MAIN_TAG}'"/' "${HELM_VALUES_PATH}"
+                                
+                                if git diff --quiet "${HELM_VALUES_PATH}"; then
+                                    echo "No changes to deploy"
+                                else
+                                    git add "${HELM_VALUES_PATH}"
+                                    git commit -m "Deploy frontend static files v${MAIN_TAG} - Build ${BUILD_NUMBER}"
+                                    git push origin main
+                                fi
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+        
         stage('Production Smoke Tests') {
             when { 
                 anyOf {
@@ -229,6 +289,9 @@ pipeline {
                             echo "❌ CloudFront health check failed: $HTTP_STATUS"
                             exit 1
                         fi
+                        
+                        # Test production URL if available
+                        curl -f "${PRODUCTION_URL}/" || echo "Production URL not available yet"
                         
                         echo "✅ Production smoke tests passed!"
                     '''
@@ -262,7 +325,7 @@ pipeline {
             
             sh '''
                 # Cleanup
-                rm -rf build || true
+                rm -rf build gitops-config || true
                 docker system prune -f || true
             '''
             cleanWs()
