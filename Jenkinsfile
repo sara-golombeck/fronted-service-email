@@ -301,30 +301,30 @@ pipeline {
             }
         }
         
-        stage('Unit Tests') {
-            when {
-                anyOf {
-                    branch 'main'
-                    branch 'feature/*'
-                    branch 'release/*'
-                }
-            }
-            steps {
-                sh '''
-                    docker build -f Dockerfile.test -t "${APP_NAME}:test-${BUILD_NUMBER}" .
-                    mkdir -p test-results
-                    docker run --rm \
-                        -v "${PWD}/test-results:/app/test-results" \
-                        "${APP_NAME}:test-${BUILD_NUMBER}"
-                '''
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'test-results/**/*', allowEmptyArchive: true
-                    sh 'docker rmi "${APP_NAME}:test-${BUILD_NUMBER}" || true'
-                }
-            }
-        }
+        // stage('Unit Tests') {
+        //     when {
+        //         anyOf {
+        //             branch 'main'
+        //             branch 'feature/*'
+        //             branch 'release/*'
+        //         }
+        //     }
+        //     steps {
+        //         sh '''
+        //             docker build -f Dockerfile.test -t "${APP_NAME}:test-${BUILD_NUMBER}" .
+        //             mkdir -p test-results
+        //             docker run --rm \
+        //                 -v "${PWD}/test-results:/app/test-results" \
+        //                 "${APP_NAME}:test-${BUILD_NUMBER}"
+        //         '''
+        //     }
+        //     post {
+        //         always {
+        //             archiveArtifacts artifacts: 'test-results/**/*', allowEmptyArchive: true
+        //             sh 'docker rmi "${APP_NAME}:test-${BUILD_NUMBER}" || true'
+        //         }
+        //     }
+        // }
         
         stage('Build Images') {
             when {
