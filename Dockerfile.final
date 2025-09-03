@@ -12,7 +12,6 @@ COPY package*.json ./
 
 # Install dependencies (npm ci is faster and more reliable than npm install)
 RUN npm ci --silent
-
 # Copy source code
 COPY . .
 
