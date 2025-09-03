@@ -58,8 +58,9 @@ COPY --from=builder /app/build /build
 # Add a default command (required for docker create)
 CMD ["sh"]
 
-# Stage 3: Nginx for local testing (optional)
+# Stage 3: Nginx for E2E testing
 FROM nginx:alpine AS nginx
 COPY --from=builder /app/build /usr/share/nginx/html
-EXPOSE 80
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 8080
 CMD ["nginx", "-g", "daemon off;"]
